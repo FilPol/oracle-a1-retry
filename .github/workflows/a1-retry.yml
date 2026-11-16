@@ -1,0 +1,60 @@
+name: a1-retry
+
+# Hourly; each run keeps retrying for ~54 minutes, so coverage is continuous.
+# On success the workflow disables itself.
+on:
+  schedule:
+    - cron: '7 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: a1-retry
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write   # lets the last step disable this workflow after a successful launch
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 58
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OCI CLI
+        run: python3 -m pip install --quiet --disable-pip-version-check oci-cli==3.96.2
+
+      - name: Write OCI config
+        env:
+          OCI_KEY: ${{ secrets.OCI_KEY }}
+          OCI_USER: ${{ secrets.OCI_USER }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+        run: |
+          umask 077
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_KEY" > ~/.oci/key.pem
+          printf '[DEFAULT]\nuser=%s\nfingerprint=%s\ntenancy=%s\nregion=eu-milan-1\nkey_file=~/.oci/key.pem\n' \
+            "$OCI_USER" "$OCI_FINGERPRINT" "$OCI_TENANCY" > ~/.oci/config
+
+      - name: Retry launch
+        id: retry
+        env:
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+          OCI_AD: ${{ secrets.OCI_AD }}
+          OCI_SUBNET: ${{ secrets.OCI_SUBNET }}
+          OCI_BOOT_VOLUME: ${{ secrets.OCI_BOOT_VOLUME }}
+          SSH_PUBKEY: ${{ secrets.SSH_PUBKEY }}
+          RUN_MINUTES: ${{ github.event_name == 'workflow_dispatch' && '10' || '54' }}
+        run: bash retry.sh
+
+      - name: Disable this workflow after a successful launch
+        if: steps.retry.outputs.launched == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable a1-retry.yml --repo "$GITHUB_REPOSITORY"
+
+      - name: Remove OCI credentials
+        if: always()
+        run: rm -rf ~/.oci
