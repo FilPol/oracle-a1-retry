@@ -1,11 +1,17 @@
 name: a1-retry
 
-# Hourly; each run keeps retrying for ~54 minutes, so coverage is continuous.
-# On success the workflow disables itself.
+# Each run keeps retrying for ~50 minutes and then dispatches the next run itself, so coverage is
+# continuous even when GitHub skips scheduled slots (common for new workflows). The hourly cron is
+# only a backup that restarts the chain if it ever breaks. On success the workflow disables itself.
 on:
   schedule:
     - cron: '7 * * * *'
   workflow_dispatch:
+    inputs:
+      minutes:
+        description: 'How long this run keeps retrying'
+        required: false
+        default: '50'
 
 concurrency:
   group: a1-retry
@@ -46,7 +52,7 @@ jobs:
           OCI_SUBNET: ${{ secrets.OCI_SUBNET }}
           OCI_BOOT_VOLUME: ${{ secrets.OCI_BOOT_VOLUME }}
           SSH_PUBKEY: ${{ secrets.SSH_PUBKEY }}
-          RUN_MINUTES: ${{ github.event_name == 'workflow_dispatch' && '10' || '54' }}
+          RUN_MINUTES: ${{ inputs.minutes || '50' }}
         run: bash retry.sh
 
       - name: Disable this workflow after a successful launch
@@ -58,3 +64,11 @@ jobs:
       - name: Remove OCI credentials
         if: always()
         run: rm -rf ~/.oci
+
+      # workflow_dispatch is one of the events GITHUB_TOKEN is allowed to trigger. The new run queues
+      # behind this one (concurrency group) and starts as soon as this job ends.
+      - name: Chain the next run
+        if: ${{ !cancelled() && steps.retry.outcome == 'success' && steps.retry.outputs.launched != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run a1-retry.yml --repo "$GITHUB_REPOSITORY" --ref main
